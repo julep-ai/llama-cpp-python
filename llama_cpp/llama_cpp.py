@@ -782,7 +782,8 @@ class llama_model_params(ctypes.Structure):
 #     void *              abort_callback_data;
 # };
 class llama_context_params(ctypes.Structure):
-    """Parameters for llama_context
+    """Parameters for llama_context. NOTE: changing the default values of parameters marked as [EXPERIMENTAL] 
+    may cause crashes or incorrect results in certain configurations.
 
     Attributes:
         n_ctx (int): text context, 0 = from model
@@ -792,7 +793,7 @@ class llama_context_params(ctypes.Structure):
         n_threads (int): number of threads to use for generation
         n_threads_batch (int): number of threads to use for batch processing
         rope_scaling_type (int): RoPE scaling type, from `enum llama_rope_scaling_type`
-        pooling_type (int): whether to pool (sum) embedding results by sequence id (ignored if no pooling layer)
+        pooling_type (int): whether to pool (sum) embedding results by sequence id
         attention_type (int): attention type to use for embeddings
         rope_freq_base (float): RoPE base frequency, 0 = from model
         rope_freq_scale (float): RoPE frequency scaling factor, 0 = from model
@@ -801,18 +802,19 @@ class llama_context_params(ctypes.Structure):
         yarn_beta_fast (float): YaRN low correction dim
         yarn_beta_slow (float): YaRN high correction dim
         yarn_orig_ctx (int): YaRN original context size
-        defrag_thold (float): defragment the KV cache if holes/size > thold, < 0 disabled (default)
+        defrag_thold (float): defragment the KV cache if holes/size > thold, <= 0 disabled (default)
         cb_eval (ggml_backend_sched_eval_callback): callback for scheduling eval
-        cb_eval_user_data (ctypes.ctypes.c_void_p): user data for cb_eval
-        type_k (int): data type for K cache
-        type_v (int): data type for V cache
-        logits_all (bool): the llama_decode() call computes all logits, not just the last one (DEPRECATED - set llama_batch.logits instead)
-        embeddings (bool): if true, extract embeddings (together with logits)
-        offload_kqv (bool): whether to offload the KQV ops (including the KV cache) to GPU
-        flash_attn (bool): whether to use flash attention
-        no_perf (bool): whether to measure performance timings
+        cb_eval_user_data (ctypes.c_void_p): user data for cb_eval
+        type_k (int): data type for K cache [EXPERIMENTAL]
+        type_v (int): data type for V cache [EXPERIMENTAL]
         abort_callback (ggml_abort_callback): abort callback if it returns true, execution of llama_decode() will be aborted
-        abort_callback_data (ctypes.ctypes.c_void_p): data for abort_callback
+        abort_callback_data (ctypes.c_void_p): data for abort_callback
+        embeddings (bool): if true, extract embeddings (together with logits)
+        offload_kqv (bool): offload the KQV ops (including the KV cache) to GPU
+        flash_attn (bool): use flash attention [EXPERIMENTAL]
+        no_perf (bool): measure performance timings
+        op_offload (bool): offload host tensor operations to device
+        swa_full (bool): use full-size SWA cache
     """
 
     if TYPE_CHECKING:
@@ -837,13 +839,14 @@ class llama_context_params(ctypes.Structure):
         cb_eval_user_data: ctypes.c_void_p
         type_k: int
         type_v: int
-        logits_all: bool
+        abort_callback: Callable[[ctypes.c_void_p], bool]
+        abort_callback_data: ctypes.c_void_p
         embeddings: bool
         offload_kqv: bool
         flash_attn: bool
         no_perf: bool
-        abort_callback: Callable[[ctypes.c_void_p], bool]
-        abort_callback_data: ctypes.c_void_p
+        op_offload: bool
+        swa_full: bool
 
     _fields_ = [
         ("n_ctx", ctypes.c_uint32),
@@ -867,13 +870,15 @@ class llama_context_params(ctypes.Structure):
         ("cb_eval_user_data", ctypes.c_void_p),
         ("type_k", ctypes.c_int),
         ("type_v", ctypes.c_int),
-        ("logits_all", ctypes.c_bool),
+        ("abort_callback", ggml_abort_callback),
+        ("abort_callback_data", ctypes.c_void_p),
+        # Keep the booleans together and at the end of the struct to avoid misalignment during copy-by-value
         ("embeddings", ctypes.c_bool),
         ("offload_kqv", ctypes.c_bool),
         ("flash_attn", ctypes.c_bool),
         ("no_perf", ctypes.c_bool),
-        ("abort_callback", ggml_abort_callback),
-        ("abort_callback_data", ctypes.c_void_p),
+        ("op_offload", ctypes.c_bool),
+        ("swa_full", ctypes.c_bool),
     ]
 
 
@@ -924,6 +929,7 @@ class llama_model_quantize_params(ctypes.Structure):
         imatrix (ctypes.c_void_p): pointer to importance matrix data
         kv_overrides (ctypes.c_void_p): pointer to vector containing overrides
         tensor_types (ctypes.c_void_p): pointer to vector containing tensor types
+        prune_layers (ctypes.c_void_p): pointer to vector containing layer indices to prune
     """
 
     if TYPE_CHECKING:
@@ -939,6 +945,7 @@ class llama_model_quantize_params(ctypes.Structure):
         imatrix: ctypes.c_void_p
         kv_overrides: ctypes.c_void_p
         tensor_types: ctypes.c_void_p
+        prune_layers: ctypes.c_void_p
 
     _fields_ = [
         ("nthread", ctypes.c_int32),
@@ -953,6 +960,7 @@ class llama_model_quantize_params(ctypes.Structure):
         ("imatrix", ctypes.c_void_p),
         ("kv_overrides", ctypes.c_void_p),
         ("tensor_types", ctypes.c_void_p),
+        ("prune_layers", ctypes.c_void_p),
     ]
 
 
@@ -1742,120 +1750,6 @@ def llama_apply_adapter_cvec(
     ...
 
 
-# //
-# // KV cache
-# //
-
-
-# // Information associated with an individual cell in the KV cache view.
-# struct llama_kv_cache_view_cell {
-#     // The position for this cell. Takes KV cache shifts into account.
-#     // May be negative if the cell is not populated.
-#     llama_pos pos;
-# };
-class llama_kv_cache_view_cell(ctypes.Structure):
-    """Information associated with an individual cell in the KV cache view.
-
-    Attributes:
-        pos (llama_pos): The position for this cell. Takes KV cache shifts into account.
-            May be negative if the cell is not populated."""
-
-    if TYPE_CHECKING:
-        pos: llama_pos
-
-    _fields_ = [("pos", llama_pos)]
-
-
-# // An updateable view of the KV cache.
-# struct llama_kv_cache_view {
-#     // Number of KV cache cells. This will be the same as the context size.
-#     int32_t n_cells;
-
-#     // Maximum number of sequences that can exist in a cell. It's not an error
-#     // if there are more sequences in a cell than this value, however they will
-#     // not be visible in the view cells_sequences.
-#     int32_t n_seq_max;
-
-#     // Number of tokens in the cache. For example, if there are two populated
-#     // cells, the first with 1 sequence id in it and the second with 2 sequence
-#     // ids then you'll have 3 tokens.
-#     int32_t token_count;
-
-#     // Number of populated cache cells.
-#     int32_t used_cells;
-
-#     // Maximum contiguous empty slots in the cache.
-#     int32_t max_contiguous;
-
-#     // Index to the start of the max_contiguous slot range. Can be negative
-#     // when cache is full.
-#     int32_t max_contiguous_idx;
-
-#     // Information for an individual cell.
-#     struct llama_kv_cache_view_cell * cells;
-
-
-#     // The sequences for each cell. There will be n_seq_max items per cell.
-#     llama_seq_id * cells_sequences;
-# };
-class llama_kv_cache_view(ctypes.Structure):
-    if TYPE_CHECKING:
-        n_cells: int
-        n_max_seq: int
-        token_count: int
-        used_cells: int
-        max_contiguous: int
-        max_contiguous_idx: int
-        cells: CtypesArray[llama_kv_cache_view_cell]
-        cells_sequences: CtypesArray[llama_seq_id]
-
-    _fields_ = [
-        ("n_cells", ctypes.c_int32),
-        ("n_max_seq", ctypes.c_int32),
-        ("token_count", ctypes.c_int32),
-        ("used_cells", ctypes.c_int32),
-        ("max_contiguous", ctypes.c_int32),
-        ("max_contiguous_idx", ctypes.c_int32),
-        ("cells", ctypes.POINTER(llama_kv_cache_view_cell)),
-        ("cells_sequences", ctypes.POINTER(llama_seq_id)),
-    ]
-
-
-llama_kv_cache_view_p = ctypes.POINTER(llama_kv_cache_view)
-
-
-# // Create an empty KV cache view. (use only for debugging purposes)
-# LLAMA_API struct llama_kv_cache_view llama_kv_cache_view_init(const struct llama_context * ctx, int32_t n_seq_max);
-@ctypes_function(
-    "llama_kv_cache_view_init",
-    [llama_context_p_ctypes, ctypes.c_int32],
-    llama_kv_cache_view,
-)
-def llama_kv_cache_view_init(
-    ctx: llama_context_p, n_seq_max: Union[ctypes.c_int32, int], /
-) -> llama_kv_cache_view:
-    """Create an empty KV cache view. (use only for debugging purposes)"""
-    ...
-
-
-# // Free a KV cache view. (use only for debugging purposes)
-# LLAMA_API void llama_kv_cache_view_free(struct llama_kv_cache_view * view);
-@ctypes_function("llama_kv_cache_view_free", [llama_kv_cache_view_p], None)
-def llama_kv_cache_view_free(view: "ctypes.pointer[llama_kv_cache_view]", /):  # type: ignore
-    """Free a KV cache view. (use only for debugging purposes)"""
-    ...
-
-
-# // Update the KV cache view structure with the current state of the KV cache. (use only for debugging purposes)
-# LLAMA_API void llama_kv_cache_view_update(const struct llama_context * ctx, struct llama_kv_cache_view * view);
-@ctypes_function(
-    "llama_kv_cache_view_update", [llama_context_p_ctypes, llama_kv_cache_view_p], None
-)
-def llama_kv_cache_view_update(ctx: llama_context_p, view: CtypesPointerOrRef[llama_kv_cache_view], /):  # type: ignore
-    """Update the KV cache view structure with the current state of the KV cache. (use only for debugging purposes)"""
-    ...
-
-
 # // Returns the number of tokens in the KV cache (slow, use only for debug)
 # // If a KV cell has multiple sequences assigned to it, it will be counted multiple times
 # LLAMA_API int32_t llama_kv_self_n_tokens(const struct llama_context * ctx);
@@ -1869,17 +1763,6 @@ def llama_kv_self_n_tokens(ctx: llama_context_p, /) -> int:
     ...
 
 
-# DEPRECATED(LLAMA_API int32_t llama_get_kv_cache_token_count(const struct llama_context * ctx),
-#         "use llama_kv_self_n_tokens instead");
-@ctypes_function(
-    "llama_get_kv_cache_token_count", [llama_context_p_ctypes], ctypes.c_int32
-)
-def llama_get_kv_cache_token_count(ctx: llama_context_p, /) -> int:
-    """Returns the number of tokens in the KV cache (slow, use only for debug)
-    If a KV cell has multiple sequences assigned to it, it will be counted multiple times
-    """
-    ...
-
 
 # // Returns the number of used KV cells (i.e. have at least one sequence assigned to them)
 # LLAMA_API int32_t llama_kv_self_used_cells(const struct llama_context * ctx);
@@ -1887,16 +1770,6 @@ def llama_get_kv_cache_token_count(ctx: llama_context_p, /) -> int:
     "llama_kv_self_used_cells", [llama_context_p_ctypes], ctypes.c_int32
 )
 def llama_kv_self_used_cells(ctx: llama_context_p, /) -> int:
-    """Returns the number of used KV cells (i.e. have at least one sequence assigned to them)"""
-    ...
-
-
-# DEPRECATED(LLAMA_API int32_t llama_get_kv_cache_used_cells(const struct llama_context * ctx),
-#         "use llama_kv_self_used_cells instead");
-@ctypes_function(
-    "llama_get_kv_cache_used_cells", [llama_context_p_ctypes], ctypes.c_int32
-)
-def llama_get_kv_cache_used_cells(ctx: llama_context_p, /) -> int:
     """Returns the number of used KV cells (i.e. have at least one sequence assigned to them)"""
     ...
 
@@ -1911,11 +1784,7 @@ def llama_kv_self_clear(ctx: llama_context_p, /):
     """Clear the KV cache - both cell info is erased and KV data is zeroed"""
     ...
 
-# NOTE: Deprecated
-@ctypes_function("llama_kv_self_clear", [llama_context_p_ctypes], None)
-def llama_kv_cache_clear(ctx: llama_context_p, /):
-    """Clear the KV cache"""
-    ...
+
 
 
 # // Removes all tokens that belong to the specified sequence and have positions in [p0, p1)
@@ -1923,13 +1792,13 @@ def llama_kv_cache_clear(ctx: llama_context_p, /):
 # // seq_id < 0 : match any sequence
 # // p0 < 0     : [0,  p1]
 # // p1 < 0     : [p0, inf)
-# LLAMA_API bool llama_kv_cache_seq_rm(
+# LLAMA_API bool llama_kv_self_seq_rm(
 #         struct llama_context * ctx,
 #                 llama_seq_id   seq_id,
 #                    llama_pos   p0,
 #                    llama_pos   p1);
 @ctypes_function(
-    "llama_kv_cache_seq_rm",
+    "llama_kv_self_seq_rm",
     [
         llama_context_p_ctypes,
         llama_seq_id,
@@ -1938,7 +1807,7 @@ def llama_kv_cache_clear(ctx: llama_context_p, /):
     ],
     ctypes.c_bool,
 )
-def llama_kv_cache_seq_rm(
+def llama_kv_self_seq_rm(
     ctx: llama_context_p,
     seq_id: Union[llama_seq_id, int],
     p0: Union[llama_pos, int],
@@ -1991,33 +1860,6 @@ def llama_kv_self_seq_cp(
     ...
 
 
-# NOTE: Deprecated
-@ctypes_function(
-    "llama_kv_self_seq_cp",
-    [
-        llama_context_p_ctypes,
-        llama_seq_id,
-        llama_seq_id,
-        llama_pos,
-        llama_pos,
-    ],
-    None,
-)
-def llama_kv_cache_seq_cp(
-    ctx: llama_context_p,
-    seq_id_src: Union[llama_seq_id, int],
-    seq_id_dst: Union[llama_seq_id, int],
-    p0: Union[llama_pos, int],
-    p1: Union[llama_pos, int],
-    /,
-):
-    """Copy all tokens that belong to the specified sequence to another sequence
-    Note that this does not allocate extra KV cache memory - it simply assigns the tokens to the new sequence
-    p0 < 0 : [0,  p1]
-    p1 < 0 : [p0, inf)"""
-    ...
-
-
 # // Removes all tokens that do not belong to the specified sequence
 # LLAMA_API void llama_kv_self_seq_keep(
 #         struct llama_context * ctx,
@@ -2030,23 +1872,14 @@ def llama_kv_self_seq_keep(ctx: llama_context_p, seq_id: Union[llama_seq_id, int
     ...
 
 
-# NOTE: Deprecated
-@ctypes_function(
-    "llama_kv_self_seq_keep", [llama_context_p_ctypes, llama_seq_id], None
-)
-def llama_kv_cache_seq_keep(ctx: llama_context_p, seq_id: Union[llama_seq_id, int], /):
-    """Removes all tokens that do not belong to the specified sequence"""
-    ...
-
-
 
 # // Adds relative position "delta" to all tokens that belong to the specified sequence and have positions in [p0, p1)
 # // If the KV cache is RoPEd, the KV data is updated accordingly:
 # //   - lazily on next llama_decode()
-# //   - explicitly with llama_kv_cache_update()
+# //   - explicitly with llama_kv_self_update()
 # // p0 < 0 : [0,  p1]
 # // p1 < 0 : [p0, inf)
-# LLAMA_API void llama_kv_cache_seq_add(
+# LLAMA_API void llama_kv_self_seq_add(
 #         struct llama_context * ctx,
 #                 llama_seq_id   seq_id,
 #                    llama_pos   p0,
@@ -2074,48 +1907,7 @@ def llama_kv_self_seq_add(
     """Adds relative position "delta" to all tokens that belong to the specified sequence and have positions in [p0, p1)
     If the KV cache is RoPEd, the KV data is updated accordingly:
     - lazily on next llama_decode()
-    - explicitly with llama_kv_cache_update()
-    p0 < 0 : [0,  p1]
-    p1 < 0 : [p0, inf)"""
-    ...
-
-
-# // NOTE: Deprecated
-# // Adds relative position "delta" to all tokens that belong to the specified sequence and have positions in [p0, p1)
-# // If the KV cache is RoPEd, the KV data is updated accordingly:
-# //   - lazily on next llama_decode()
-# //   - explicitly with llama_kv_cache_update()
-# // p0 < 0 : [0,  p1]
-# // p1 < 0 : [p0, inf)
-# LLAMA_API void llama_kv_cache_seq_add(
-#         struct llama_context * ctx,
-#                 llama_seq_id   seq_id,
-#                    llama_pos   p0,
-#                    llama_pos   p1,
-#                    llama_pos   delta);
-@ctypes_function(
-    "llama_kv_self_seq_add",
-    [
-        llama_context_p_ctypes,
-        llama_seq_id,
-        llama_pos,
-        llama_pos,
-        llama_pos,
-    ],
-    None,
-)
-def llama_kv_cache_seq_add(
-    ctx: llama_context_p,
-    seq_id: Union[llama_seq_id, int],
-    p0: Union[llama_pos, int],
-    p1: Union[llama_pos, int],
-    delta: Union[llama_pos, int],
-    /,
-):
-    """Adds relative position "delta" to all tokens that belong to the specified sequence and have positions in [p0, p1)
-    If the KV cache is RoPEd, the KV data is updated accordingly:
-    - lazily on next llama_decode()
-    - explicitly with llama_kv_cache_update()
+    - explicitly with llama_kv_self_update()
     p0 < 0 : [0,  p1]
     p1 < 0 : [p0, inf)"""
     ...
@@ -2125,7 +1917,7 @@ def llama_kv_cache_seq_add(
 # // If the KV cache is RoPEd, the KV data is updated accordingly
 # // p0 < 0 : [0,  p1]
 # // p1 < 0 : [p0, inf)
-# LLAMA_API void llama_kv_cache_seq_div(
+# LLAMA_API void llama_kv_self_seq_div(
 #         struct llama_context * ctx,
 #                 llama_seq_id   seq_id,
 #                    llama_pos   p0,
@@ -2143,43 +1935,6 @@ def llama_kv_cache_seq_add(
     None,
 )
 def llama_kv_self_seq_div(
-    ctx: llama_context_p,
-    seq_id: Union[llama_seq_id, int],
-    p0: Union[llama_pos, int],
-    p1: Union[llama_pos, int],
-    d: Union[ctypes.c_int, int],
-    /,
-):
-    """Integer division of the positions by factor of `d > 1`
-    If the KV cache is RoPEd, the KV data is updated accordingly
-    p0 < 0 : [0,  p1]
-    p1 < 0 : [p0, inf)"""
-    ...
-
-
-# // NOTE: Deprecated
-# // Integer division of the positions by factor of `d > 1`
-# // If the KV cache is RoPEd, the KV data is updated accordingly
-# // p0 < 0 : [0,  p1]
-# // p1 < 0 : [p0, inf)
-# LLAMA_API void llama_kv_cache_seq_div(
-#         struct llama_context * ctx,
-#                 llama_seq_id   seq_id,
-#                    llama_pos   p0,
-#                    llama_pos   p1,
-#                          int   d);
-@ctypes_function(
-    "llama_kv_self_seq_div",
-    [
-        llama_context_p_ctypes,
-        llama_seq_id,
-        llama_pos,
-        llama_pos,
-        ctypes.c_int,
-    ],
-    None,
-)
-def llama_kv_cache_seq_div(
     ctx: llama_context_p,
     seq_id: Union[llama_seq_id, int],
     p0: Union[llama_pos, int],
@@ -2218,54 +1973,21 @@ def llama_kv_self_defrag(ctx: llama_context_p, /):
     """Defragment the KV cache
     This will be applied:
     - lazily on next llama_decode()
-    - explicitly with llama_kv_cache_update()"""
-    ...
-
-
-# NOTE: Deprecated
-# // Defragment the KV cache
-# // This will be applied:
-# //   - lazily on next llama_decode()
-# //   - explicitly with llama_kv_self_update()
-# LLAMA_API void llama_kv_cache_defrag(struct llama_context * ctx);
-@ctypes_function("llama_kv_cache_defrag", [llama_context_p_ctypes], None)
-def llama_kv_cache_defrag(ctx: llama_context_p, /):
-    """Defragment the KV cache
-    This will be applied:
-    - lazily on next llama_decode()
-    - explicitly with llama_kv_cache_update()"""
+    - explicitly with llama_kv_self_update()"""
     ...
 
 
 # // Apply the KV cache updates (such as K-shifts, defragmentation, etc.)
-# LLAMA_API void llama_kv_cache_update(struct llama_context * ctx);
+# LLAMA_API void llama_kv_self_update(struct llama_context * ctx);
 @ctypes_function("llama_kv_self_update", [llama_context_p_ctypes], None)
 def llama_kv_self_update(ctx: llama_context_p, /):
     """Apply the KV cache updates (such as K-shifts, defragmentation, etc.)"""
     ...
 
-# // NOTE: Deprecated
-# // Apply the KV cache updates (such as K-shifts, defragmentation, etc.)
-# LLAMA_API void llama_kv_cache_update(struct llama_context * ctx);
-@ctypes_function("llama_kv_self_update", [llama_context_p_ctypes], None)
-def llama_kv_cache_update(ctx: llama_context_p, /):
-    """Apply the KV cache updates (such as K-shifts, defragmentation, etc.)"""
-    ...
-
-
 # // Check if the context supports KV cache shifting
-# LLAMA_API bool llama_kv_cache_can_shift(struct llama_context * ctx);
+# LLAMA_API bool llama_kv_self_can_shift(struct llama_context * ctx);
 @ctypes_function("llama_kv_self_can_shift", [llama_context_p_ctypes], ctypes.c_bool)
 def llama_kv_self_can_shift(ctx: llama_context_p, /) -> bool:
-    """Check if the context supports KV cache shifting"""
-    ...
-
-
-# // NOTE: Deprecated
-# // Check if the context supports KV cache shifting
-# LLAMA_API bool llama_kv_cache_can_shift(struct llama_context * ctx);
-@ctypes_function("llama_kv_self_can_shift", [llama_context_p_ctypes], ctypes.c_bool)
-def llama_kv_cache_can_shift(ctx: llama_context_p, /) -> bool:
     """Check if the context supports KV cache shifting"""
     ...
 
@@ -3493,7 +3215,7 @@ def llama_detokenize(
 # /// Apply chat template. Inspired by hf apply_chat_template() on python.
 # /// Both "model" and "custom_template" are optional, but at least one is required. "custom_template" has higher precedence than "model"
 # /// NOTE: This function does not use a jinja parser. It only support a pre-defined list of template. See more: https://github.com/ggerganov/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template
-# /// @param tmpl A Jinja template to use for this chat. If this is nullptr, the model’s default chat template will be used instead.
+# /// @param tmpl A Jinja template to use for this chat. If this is nullptr, the model's default chat template will be used instead.
 # /// @param chat Pointer to a list of multiple llama_chat_message
 # /// @param n_msg Number of llama_chat_message in this chat
 # /// @param add_ass Whether to end the prompt with the token(s) that indicate the start of an assistant message.
