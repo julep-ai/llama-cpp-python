@@ -2714,15 +2714,15 @@ class Llava15ChatHandler:
     )
 
     def __init__(self, clip_model_path: str, verbose: bool = True):
-        import llama_cpp.llava_cpp as llava_cpp
+        import llama_cpp.mtmd_cpp as mtmd_cpp
 
         self.clip_model_path = clip_model_path
         self.verbose = verbose
 
-        self._llava_cpp = llava_cpp  # TODO: Fix
+        self._mtmd_cpp = mtmd_cpp  # TODO: Fix
         self._exit_stack = ExitStack()
         self._last_image_embed: Optional[
-            llava_cpp.CtypesPointer[llava_cpp.llava_image_embed]
+            mtmd_cpp.CtypesPointer[mtmd_cpp.mtmd_cpp_image_embed]
         ] = None
         self._last_image_hash: Optional[int] = None
 
@@ -2730,7 +2730,7 @@ class Llava15ChatHandler:
             raise ValueError(f"Clip model path does not exist: {clip_model_path}")
 
         with suppress_stdout_stderr(disable=self.verbose):
-            clip_ctx = self._llava_cpp.clip_model_load(self.clip_model_path.encode(), 0)
+            clip_ctx = self._mtmd_cpp.clip_model_load(self.clip_model_path.encode(), 0)
 
             if clip_ctx is None:
                 raise ValueError(f"Failed to load clip model: {clip_model_path}")
@@ -2739,14 +2739,14 @@ class Llava15ChatHandler:
 
             def clip_free():
                 with suppress_stdout_stderr(disable=self.verbose):
-                    self._llava_cpp.clip_free(self.clip_ctx)
+                    self._mtmd_cpp.clip_free(self.clip_ctx)
 
             self._exit_stack.callback(clip_free)
 
         def last_image_embed_free():
             with suppress_stdout_stderr(disable=self.verbose):
                 if self._last_image_embed is not None:
-                    self._llava_cpp.llava_image_embed_free(self._last_image_embed)
+                    self._mtmd_cpp.mtmd_cpp_image_embed_free(self._last_image_embed)
                     self._last_image_embed = None
 
         self._exit_stack.callback(last_image_embed_free)
@@ -2764,10 +2764,10 @@ class Llava15ChatHandler:
         with suppress_stdout_stderr(disable=self.verbose):
             # Free the previous image embed
             if self._last_image_embed is not None:
-                self._llava_cpp.llava_image_embed_free(self._last_image_embed)
+                self._mtmd_cpp.mtmd_cpp_image_embed_free(self._last_image_embed)
                 self._last_image_embed = None
                 self._last_image_hash = None
-            embed = self._llava_cpp.llava_image_embed_make_with_bytes(
+            embed = self._mtmd_cpp.mtmd_cpp_image_embed_make_with_bytes(
                 self.clip_ctx,
                 n_threads_batch,
                 (ctypes.c_uint8 * len(image_bytes)).from_buffer(
@@ -2955,7 +2955,7 @@ class Llava15ChatHandler:
         n_past = ctypes.c_int(llama.n_tokens)
         n_past_p = ctypes.pointer(n_past)
         with suppress_stdout_stderr(disable=self.verbose):
-            self._llava_cpp.llava_eval_image_embed(
+            self._mtmd_cpp.mtmd_cpp_eval_image_embed(
                 llama.ctx,
                 embed,
                 llama.n_batch,
@@ -3483,30 +3483,30 @@ class Gemma3ChatHandler(Llava15ChatHandler):
             )
 
         img_bytes = self.load_image(image_url)
-        img_u8_p = self._llava_cpp.clip_image_u8_init()
-        if not self._llava_cpp.clip_image_load_from_bytes(
+        img_u8_p = self._mtmd_cpp.clip_image_u8_init()
+        if not self._mtmd_cpp.clip_image_load_from_bytes(
             ctypes.create_string_buffer(img_bytes, len(img_bytes)),
             ctypes.c_size_t(len(img_bytes)),
             img_u8_p,
         ):
-            self._llava_cpp.clip_image_u8_free(img_u8_p)
+            self._mtmd_cpp.clip_image_u8_free(img_u8_p)
             raise ValueError("Failed to load image.")
 
-        img_f32_p = self._llava_cpp.clip_image_f32_batch_init()
-        if not self._llava_cpp.clip_image_preprocess(self.clip_ctx, img_u8_p, img_f32_p):
-            self._llava_cpp.clip_image_f32_batch_free(img_f32_p)
-            self._llava_cpp.clip_image_u8_free(img_u8_p)
+        img_f32_p = self._mtmd_cpp.clip_image_f32_batch_init()
+        if not self._mtmd_cpp.clip_image_preprocess(self.clip_ctx, img_u8_p, img_f32_p):
+            self._mtmd_cpp.clip_image_f32_batch_free(img_f32_p)
+            self._mtmd_cpp.clip_image_u8_free(img_u8_p)
             raise ValueError("Failed to preprocess image.")
 
         n_embd = llama_cpp.llama_model_n_embd(llama._model.model)
         embed = (ctypes.c_float * (n_tokens * n_embd))()
-        if not self._llava_cpp.clip_image_batch_encode(self.clip_ctx, llama.n_threads, img_f32_p, embed):
-            self._llava_cpp.clip_image_f32_batch_free(img_f32_p)
-            self._llava_cpp.clip_image_u8_free(img_u8_p)
+        if not self._mtmd_cpp.clip_image_batch_encode(self.clip_ctx, llama.n_threads, img_f32_p, embed):
+            self._mtmd_cpp.clip_image_f32_batch_free(img_f32_p)
+            self._mtmd_cpp.clip_image_u8_free(img_u8_p)
             raise ValueError("Failed to encode image.")
 
-        self._llava_cpp.clip_image_f32_batch_free(img_f32_p)
-        self._llava_cpp.clip_image_u8_free(img_u8_p)
+        self._mtmd_cpp.clip_image_f32_batch_free(img_f32_p)
+        self._mtmd_cpp.clip_image_u8_free(img_u8_p)
         llama_cpp.llama_set_causal_attn(llama.ctx, False)
 
         seq_id_0 = (ctypes.c_int32 * 1)()
