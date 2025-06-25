@@ -2713,22 +2713,27 @@ class Llava15ChatHandler:
         "{% endif %}"
     )
 
-    def __init__(self, clip_model_path: str, llama_model: llama.Llama, verbose: bool = True):
-        import llama_cpp.mtmd_cpp as mtmd_cpp
-
+    def __init__(self, clip_model_path: str, llama_model: Optional[llama.Llama] = None, verbose: bool = True):
         self.clip_model_path = clip_model_path
         self.verbose = verbose
-
-        self._mtmd_cpp = mtmd_cpp
+        self._mtmd_cpp = None
         self._exit_stack = ExitStack()
         self._bitmap_manager = None
+        self.clip_ctx = None
+        self._params = None
 
         if not os.path.exists(clip_model_path):
             raise ValueError(f"Clip model path does not exist: {clip_model_path}")
 
-        # We'll initialize the clip context later when we have the llama model
-        self.clip_ctx = None
-        self._params = None
+        # Initialize MTMD context if model is provided
+        if llama_model is not None:
+            self.initialize_mtmd_context(llama_model)
+
+    def initialize_mtmd_context(self, llama_model: llama.Llama):
+        """Initialize the MTMD context with a llama model."""
+        import llama_cpp.mtmd_cpp as mtmd_cpp
+        self._mtmd_cpp = mtmd_cpp
+
         with suppress_stdout_stderr(disable=self.verbose):
             params = self._mtmd_cpp.mtmd_context_params_default()
             params.use_gpu = True  # TODO: Make configurable
@@ -2748,10 +2753,22 @@ class Llava15ChatHandler:
 
             self._exit_stack.callback(mtmd_free)
 
+    def __call__(self, *args, **kwargs):
+        if self.clip_ctx is None:
+            # Initialize MTMD context with the llama model from the first argument
+            if len(args) > 0 and isinstance(args[0], llama.Llama):
+                self.initialize_mtmd_context(args[0])
+            else:
+                raise ValueError("MTMD context not initialized. Please call initialize_mtmd_context with a llama model first.")
+        return super().__call__(*args, **kwargs)
+
     def load_image(self, image_url: str) -> bytes:
         return self._load_image(image_url)
 
     def eval_image(self, llama: llama.Llama, image_url: str):
+        if self.clip_ctx is None:
+            self.initialize_mtmd_context(llama)
+
         image_bytes = self.load_image(image_url)
         
         # Create bitmap manager if not exists
@@ -3480,61 +3497,6 @@ class Gemma3ChatHandler(Llava15ChatHandler):
                 split_text.append(("text", remaining))
                 remaining = ""
         return split_text
-
-    def eval_image(self, llama: llama.Llama, image_url: str):
-        image_bytes = self.load_image(image_url)
-        
-        # Create bitmap manager if not exists
-        if self._bitmap_manager is None:
-            self._bitmap_manager = self._mtmd_cpp.BitmapManager()
-
-        # Create bitmap from bytes
-        if not self._bitmap_manager.add_from_memory(self.clip_ctx, image_bytes):
-            raise ValueError("Failed to create bitmap from image bytes")
-
-        # Create input chunks for the bitmap
-        chunks = self._mtmd_cpp.mtmd_input_chunks_init()
-        if chunks is None:
-            raise ValueError("Failed to create input chunks")
-
-        # Create input text with media marker
-        # Get media marker from context params
-        params = self._mtmd_cpp.mtmd_context_params_default()
-        text = self._mtmd_cpp.mtmd_input_text()
-        text.text = params.media_marker if params.media_marker else self._mtmd_cpp.mtmd_default_marker()
-        text.add_special = False
-        text.parse_special = True
-
-        # Tokenize with bitmap
-        if self._mtmd_cpp.mtmd_tokenize(self.clip_ctx, chunks, text, self._bitmap_manager.c_ptr(), len(self._bitmap_manager.entries)) != 0:
-            self._mtmd_cpp.mtmd_input_chunks_free(chunks)
-            raise ValueError("Failed to tokenize image")
-
-        # Get new n_past after evaluation
-        n_past = ctypes.c_int(llama.n_tokens)
-        n_past_p = ctypes.pointer(n_past)
-
-        # Evaluate chunks
-        if self._mtmd_cpp.mtmd_helper_eval_chunks(
-            self.clip_ctx,
-            llama.ctx,
-            chunks,
-            llama.n_tokens,
-            0,  # seq_id
-            llama.n_batch,
-            True,  # logits_last
-            n_past_p
-        ) != 0:
-            self._mtmd_cpp.mtmd_input_chunks_free(chunks)
-            raise ValueError("Failed to evaluate chunks")
-
-        # Update n_tokens
-        llama.input_ids[llama.n_tokens : n_past.value] = -1
-        llama.n_tokens = n_past.value
-
-        # Cleanup
-        self._mtmd_cpp.mtmd_input_chunks_free(chunks)
-        self._bitmap_manager.clear()
 
 
 def _accumulate_chunks(
